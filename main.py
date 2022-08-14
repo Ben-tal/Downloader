@@ -1,45 +1,24 @@
 import re
 import sys
+import threading
 import urllib.request
-
 import requests
-import PySide6
-from ui_popup import Ui_Dialog
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 from PySide6.QtWidgets import *
 from ui_main import Ui_MainWindow
 
-
-class PopUp(QWidget):
-    def __init__(self, POPUP_SIGNAL):
-        super(PopUp, self).__init__(parent=None)
-        self.ui = Ui_Dialog()
-        self.ui.setupUi(self)
-        self.POPUP_SIGNAL = POPUP_SIGNAL
-
-        self.setWindowTitle("PySide6")
-        self.ui.pushButton.clicked.connect(self.close)
-
-    def closeEvent(self, event):
-        self.POPUP_SIGNAL.emit()
-        super(PopUp, self).closeEvent(event)
-
-
 class MainWindow(QMainWindow):
     PROGRESS_BAR_SIGNAL = Signal(int)
-    ON_CLOSE_POPUP_SIGNAL = Signal()
+    COMPLETED_SIGNAL = Signal()
 
     def __init__(self):
         super(MainWindow, self).__init__(parent=None)
-        self.popup = PopUp(self.ON_CLOSE_POPUP_SIGNAL)
-        self.ON_CLOSE_POPUP_SIGNAL.connect(lambda: self.setEnabled(True))
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle("Updater")
+        self.setWindowTitle("Downloader")
         self.ui.listWidget.clear()
         self.releases = {}
-        self.ui.toolButton.clicked.connect(lambda: self.GetFile(self.ui.lineEdit))
         self.ui.toolButton_2.clicked.connect(lambda: self.GetDirectory(self.ui.lineEdit_2))
         self.ui.lineEdit_3.textChanged.connect(self.CheckValidURL)
         self.ui.listWidget.currentItemChanged.connect(self.ChangeList)
@@ -47,22 +26,28 @@ class MainWindow(QMainWindow):
         self.ui.pushButton_2.setEnabled(False)
         self.ui.pushButton_2.clicked.connect(self.Download)
         self.ui.pushButton.clicked.connect(self.start)
-        self.ui.tableWidget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.ui.tableWidget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.ui.tableWidget.currentItemChanged.connect(self.ChangeTable)
         self.PROGRESS_BAR_SIGNAL.connect(self.ui.progressBar.setValue)
+        self.COMPLETED_SIGNAL.connect(self.Completed)
 
     def ChangeList(self, selected_name, deselected_name):
-        total = ""
         self.ui.tableWidget.clearMask()
         self.ui.tableWidget.setRowCount(0)
-        for key, value in self.releases.get(selected_name.text()).items():
-            total += f"{key}: {value}\r\n"
+        self.ui.pushButton_2.setEnabled(False)
+        if not selected_name:
+            return
+        for key, value in self.releases.get(selected_name.tag_name).items():
             if key == "assets":
                 for asset in value:
                     currentRow = self.ui.tableWidget.rowCount()
                     self.ui.tableWidget.setRowCount(currentRow + 1)
                     self.ui.tableWidget.setItem(currentRow, 0, QTableWidgetItem(asset["name"]))
                     self.ui.tableWidget.setItem(currentRow, 1, QTableWidgetItem(asset["content_type"]))
-                    self.ui.tableWidget.setItem(currentRow, 2, QTableWidgetItem(str(asset["size"])))
+                    size = QTableWidgetItem()
+                    size.setText(f"{asset['size']} bytes")
+                    size.setData(Qt.UserRole+1, int(asset["size"]))
+                    self.ui.tableWidget.setItem(currentRow, 2, size)
                     self.ui.tableWidget.setItem(currentRow, 3, QTableWidgetItem(str(asset["download_count"])))
                     self.ui.tableWidget.setItem(currentRow, 4, QTableWidgetItem(asset["updated_at"]))
                     self.ui.tableWidget.setItem(currentRow, 5, QTableWidgetItem(asset["created_at"]))
@@ -72,17 +57,21 @@ class MainWindow(QMainWindow):
                 self.ui.tableWidget.setRowCount(currentRow + 1)
                 self.ui.tableWidget.setItem(currentRow, 0, QTableWidgetItem("SOURCE_CODE"))
                 self.ui.tableWidget.setItem(currentRow, 1, QTableWidgetItem(key.replace("_url", "")))
-                self.ui.tableWidget.setItem(currentRow, 2, QTableWidgetItem("NA"))
+                size = QTableWidgetItem()
+                size.setText("NA")
+                size.setData(Qt.UserRole + 1, 0)
+                self.ui.tableWidget.setItem(currentRow, 2, size)
                 self.ui.tableWidget.setItem(currentRow, 3, QTableWidgetItem("NA"))
                 self.ui.tableWidget.setItem(currentRow, 4, QTableWidgetItem("NA"))
                 self.ui.tableWidget.setItem(currentRow, 5, QTableWidgetItem("NA"))
                 self.ui.tableWidget.setItem(currentRow, 6, QTableWidgetItem(value))
             elif key == "body":
                 self.ui.textEdit.setText(value)
+
+    def ChangeTable(self):
         self.ui.pushButton_2.setEnabled(True)
 
     def Download(self):
-        self.ui.progressBar.clearMask()
         self.ui.tableWidget.currentRow()
         url = self.ui.tableWidget.item(self.ui.tableWidget.currentRow(), 6).text()
         name = self.ui.tableWidget.item(self.ui.tableWidget.currentRow(), 0).text()
@@ -91,42 +80,27 @@ class MainWindow(QMainWindow):
             name = name + ".zip"
         elif content_type == "tarball":
             name = name + ".tar.gz"
-        # req = requests.get(self.url + "/" + self.ui.listWidget.currentItem().text())
-        # if "message" in req.json().keys():
-        #     text = f"Something went wrong, {req.json()['message']}"
-        # elif "assets" not in req.json().keys():
-        #     text = "Something went wrong, No assets found"
-        # else:
-        # url = req.json()["assets"][0].get("browser_download_url")
-        # name = req.json()["assets"][0].get("name")
-        print(f"[Starting Download] {url}")
-        urllib.request.urlretrieve(url, name, self.UpdateProgressBar)
-        print("[Download Complete]")
-        text = "Download Complete"
-        self.setEnabled(False)
-        self.popup.ui.label.setText(text)
-        self.popup.show()
+        if not self.ui.lineEdit_2.text():
+            QMessageBox.warning(self, "Warning", "Please select a directory")
+            return
+        print(f"[Starting Download]\r\n{url}")
+        d_thread = threading.Thread(target=self.DownloadThread, args=(url, name))
+        d_thread.start()
+
+    def Completed(self):
+        QMessageBox.information(self, "Information", "Download Complete")
         self.ui.progressBar.setValue(0)
 
-    def UpdateInfo(self, url):
-        req = requests.get(url)
-        if "message" in req.json().keys():
-            text = f"Something went wrong, {req.json()['message']}"
-        elif "assets" not in req.json().keys():
-            text = "Something went wrong, No assets found"
-        else:
-            for asset in req.json()["assets"]:
-                url = asset.get("browser_download_url")
-                name = asset.get("name")
+    def DownloadThread(self, url, name):
+        urllib.request.urlretrieve(url, f"{self.ui.lineEdit_2.text()}/{name}", self.UpdateProgressBar)
+        print("[Download Complete]")
+        self.COMPLETED_SIGNAL.emit()
 
     def UpdateProgressBar(self, block_num, block_size, total_size):
         if total_size == -1:
             return
         present = round(block_num * block_size * 100 / total_size)
         self.PROGRESS_BAR_SIGNAL.emit(present)
-
-    def GetFile(self, lineEdit):
-        lineEdit.setText(QFileDialog.getOpenFileName()[0])
 
     def GetDirectory(self, lineEdit):
         lineEdit.setText(QFileDialog.getExistingDirectory())
@@ -140,21 +114,30 @@ class MainWindow(QMainWindow):
             self.ui.pushButton.setEnabled(False)
 
     def start(self):
-        self.ui.progressBar.clearMask()
         self.ui.pushButton_2.setEnabled(False)
         if self.ui.comboBox.currentText() == "Github Release":
-            print("GitHub Release")
+            if self.ui.lineEdit_3.text()[-1] == "/":
+                self.ui.lineEdit_3.setText(self.ui.lineEdit_3.text()[:-1])
             userGit, repoGit = self.ui.lineEdit_3.text().rsplit("/", 2)[1:3]
-            self.url = f"https://api.github.com/repos/{userGit}/{repoGit}/releases"
-            print(userGit, repoGit)
             current_req = requests.get(f"https://api.github.com/repos/{userGit}/{repoGit}/releases")
             releases = current_req.json()
             self.ui.listWidget.clear()
+            if type(releases) is dict and "message" in releases.keys():
+                QMessageBox.warning(self, "Warning", releases["message"])
+                return
             for release in releases:
                 tag_name = release.pop("tag_name")
-                self.ui.listWidget.addItem(tag_name)
+                preview = release.pop("prerelease")
+                draft = release.pop("draft")
+                display = tag_name
+                if preview:
+                    display += " (Preview)"
+                if draft:
+                    display += " (Draft)"
+                _ = QListWidgetItem(display)
+                _.tag_name = tag_name
+                self.ui.listWidget.addItem(_)
                 self.releases.update({tag_name: release})
-            print(self.releases)
 
 
 if __name__ == "__main__":
